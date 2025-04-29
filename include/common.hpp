@@ -58,7 +58,7 @@
 #define TCLOCAL_TYPE    uint64_t
 #define WARP_SIZE       32
 #define THREADS_PER_BLK 1024
-#define WARP_NUM    (THREADS_PER_BLK / WARP_SIZE)
+#define WARP_NUM        (THREADS_PER_BLK / WARP_SIZE)
 #define IMBALANCE_THRESHOLD 8
 
 typedef uint32_t vint;
