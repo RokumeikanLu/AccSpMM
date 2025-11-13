@@ -87,8 +87,8 @@ void tf32_mma_kernel(
 
     __syncthreads();
 
-    vint dense_rowIdx01 = d_sparseA2B[row01];
-    vint dense_rowIdx23 = d_sparseA2B[row23];
+    vint dense_rowIdx01 = d_sharedSparseA2B[row01];
+    vint dense_rowIdx23 = d_sharedSparseA2B[row23];
     if(dense_rowIdx01 > numNodes) {
         fragB00[0] = 0.0; fragB00[1] = 0.0; 
         fragB01[0] = 0.0; fragB01[1] = 0.0;
