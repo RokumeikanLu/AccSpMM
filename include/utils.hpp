@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include <string>
 #include <cstring>
+#define N 2
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
 void check(cudaError_t err, const char* const func, const char* const file,
@@ -62,13 +63,10 @@ void init_vec1(const vint nnz, MAT_VAL_TYPE* Mat, MAT_VAL_TYPE val) {
     }
 }
 
-void init_vecB(const vint rows, const vint cols, MAT_VAL_TYPE* Mat, MAT_VAL_TYPE val) {
-    vint t = 1;
-    for(vint i = 0; i < rows; ++i) {
-        for(vint j = 0; j < cols; ++j) {
-            Mat[i * cols + j] = t;
-        }
-        t += 1;
+void init_vecB(const vint nnz, MAT_VAL_TYPE* Mat, MAT_VAL_TYPE val) {
+    for(vint i = 0; i < nnz; ++i) {
+        MAT_VAL_TYPE rd = rand() % (N + 1) / (float)(N + 1);
+        Mat[i] = val * rd;
     }
 }
 
