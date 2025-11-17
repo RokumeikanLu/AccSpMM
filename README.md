@@ -1,6 +1,6 @@
 # Acc-SpMM
 
-- This repository fixes the typos/issues in the official code of [Acc-SpMM](https://arxiv.org/pdf/2501.09251) (PPoPP25).
+- This repository fixes the typos/issues in the [official code](https://github.com/AI4SClab/AccSpMM) of [Acc-SpMM](https://arxiv.org/pdf/2501.09251) (PPoPP25).
     - Check the SpMM output error with cublas in `src/mma_tf32.cu`.
     - Fix all the index issues in `include/mma_tf32.cuh`.
     - Reset output for the last kernel launch in `include/tf32_comp.hpp` to obtain a single round output, since the adap kernel uses atomic add and thus cannot overwrite the output matrix C, which has been written for many times in previous rounds.
