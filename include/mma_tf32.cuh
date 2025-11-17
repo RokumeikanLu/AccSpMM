@@ -15,8 +15,8 @@ void tf32_mma_kernel(
     const TCLOCAL_TYPE* __restrict__    d_tcLocalBit, 
     const vint*         __restrict__    d_sparseA2B,
     const MAT_VAL_TYPE* __restrict__    d_valueA,
-    const MAT_PTR_TYPE* __restrict__    d_block2Idx,
-    const MAT_PTR_TYPE* __restrict__    d_data2Idx,
+    const MAT_PTR_TYPE* __restrict__    d_block2Idx, //d_rowWindowOffset
+    const MAT_PTR_TYPE* __restrict__    d_data2Idx, //d_TCBlockOffset
     const MAT_VAL_TYPE* __restrict__    d_MatB, 
     MAT_VAL_TYPE* d_MatC,
     const vint numNodes,
@@ -212,7 +212,7 @@ void tf32_mma_kernel(
         tf32_m16n8k8(fragB10, fragA, fragC[0]);
         tf32_m16n8k8(fragB11, fragA, fragC[1]);
     }
-    
+
     vint colC  =  0;
     vint rowC  =  0;
     
@@ -583,8 +583,10 @@ void tf32_mma_balance_kernel (
     vint colA0           =   tID_in_group;
     vint colA1           =   tID_in_group + 4;
 
-    vint colB02          =   groupID;
-    vint colB13          =   groupID + 8;
+    // vint colB02          =   groupID;
+    // vint colB13          =   groupID + 8;
+    vint colB02          =   groupID + (local_warpID << 5);
+    vint colB13          =   groupID + 8 + (local_warpID << 5);
     vint row01           =   tID_in_group;
     vint row23           =   tID_in_group + 4;
     
@@ -776,7 +778,8 @@ void tf32_mma_balance_kernel (
         tf32_m16n8k8(fragB0[0], fragA, fragC[0]);
         tf32_m16n8k8(fragB0[1], fragA, fragC[1]);
     } else {
-        tf32_m16n8k8(fragB1[1], fragA, fragC[0]);
+        // tf32_m16n8k8(fragB1[1], fragA, fragC[0]);
+        tf32_m16n8k8(fragB1[0], fragA, fragC[0]);
         tf32_m16n8k8(fragB1[1], fragA, fragC[1]);
     }
 
@@ -826,8 +829,8 @@ void tf32_mma_balance_g128_kernel (
     vint colA0           =   tID_in_group;
     vint colA1           =   tID_in_group + 4;
 
-    vint colB02          =   groupID;
-    vint colB13          =   groupID + 8;
+    vint colB02          =   groupID + (local_warpID << 5);
+    vint colB13          =   groupID + 8 + (local_warpID << 5);
     vint row01           =   tID_in_group;
     vint row23           =   tID_in_group + 4;
     
