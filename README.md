@@ -21,7 +21,7 @@
 1. Clone the repository
 
     ```
-    git clone https://github.com/AI4SClab/AccSpMM.git
+    git clone https://github.com/RokumeikanLu/AccSpMM.git
     cd AccSpMM
     ```
 
