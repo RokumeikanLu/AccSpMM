@@ -30,18 +30,27 @@ private:
         block_size = dim3(WARP_SIZE, warpsPerBlk, 1);
     }
     
-    template<typename KernelFunc, typename... Args>
-    void executeKernel(GpuTimer& timer, KernelFunc kernel, dim3 grid_size, dim3 block_size, Args... args) const {
+    template<typename KernelFunc, typename ResetFunc, typename... Args>
+    void executeKernel(GpuTimer& timer,
+                        KernelFunc kernel,
+                        dim3 grid_size,
+                        dim3 block_size,
+                        ResetFunc reset_output,
+                        Args... args) const {
         for(int i = 0; i < WARMUP_TIME; ++i) {
             kernel<<<grid_size, block_size>>>(args...);
         }
         cudaDeviceSynchronize();
-        
+
         timer.Start();
         for(int i = 0; i < EXE_TIME; ++i) {
             kernel<<<grid_size, block_size>>>(args...);
         }
         timer.Stop();
+        cudaDeviceSynchronize();
+
+        reset_output();
+        kernel<<<grid_size, block_size>>>(args...);
         cudaDeviceSynchronize();
     }
     
@@ -67,14 +76,19 @@ public:
         
         std::cout << "doing pipelining mma ..." << std::endl;
         
+        const size_t denseC_elems = static_cast<size_t>(numBlocks) * ROW_WINDOW * feature_dim;
+        auto reset_output = [ptr = d_DenseMatC, bytes = denseC_elems * sizeof(MAT_VAL_TYPE)]() {
+            CHECK_CUDA_ERROR(cudaMemsetAsync(ptr, 0, bytes));
+        };
+
         if (feature_dim <= THRESHOLD) {
-            executeKernel(timer, tf32_mma_kernel, grid_size, block_size, 
-                          d_tcLocalBit, d_sparseA2B, d_dataA, d_rowWindowOffset, 
-                          d_metcOffset, d_DenseMatB, d_DenseMatC, numNodes, feature_dim);
+            executeKernel(timer, tf32_mma_kernel, grid_size, block_size, reset_output,
+                                 d_tcLocalBit, d_sparseA2B, d_dataA, d_rowWindowOffset,
+                                 d_metcOffset, d_DenseMatB, d_DenseMatC, numNodes, feature_dim);
         } else {
-            executeKernel(timer, tf32_mma_g512_kernel, grid_size, block_size, 
-                          d_tcLocalBit, d_sparseA2B, d_dataA, d_rowWindowOffset, 
-                          d_metcOffset, d_DenseMatB, d_DenseMatC, numNodes, feature_dim);
+            executeKernel(timer, tf32_mma_g512_kernel, grid_size, block_size, reset_output,
+                                 d_tcLocalBit, d_sparseA2B, d_dataA, d_rowWindowOffset,
+                                 d_metcOffset, d_DenseMatB, d_DenseMatC, numNodes, feature_dim);
         }
         return timer.Elapsed() / EXE_TIME;
     }
@@ -98,16 +112,21 @@ public:
         
         std::cout << "doing AdpBalance pipelining ..." << std::endl;
         
+        const size_t denseC_elems = static_cast<size_t>(numNodes) * feature_dim;
+        auto reset_output = [ptr = d_DenseMatC, bytes = denseC_elems * sizeof(MAT_VAL_TYPE)]() {
+            CHECK_CUDA_ERROR(cudaMemsetAsync(ptr, 0, bytes));
+        };
+
         if (feature_dim <= THRESHOLD) {
-            executeKernel(timer, tf32_mma_balance_kernel, grid_size, block_size,
-                          d_adp_group_offset, d_tc_offset, d_adp_row_indices, d_tcLocalBit, 
-                          d_sparseA2B, d_dataA, d_DenseMatB, d_DenseMatC,
-                          numNodes, feature_dim);
+            executeKernel(timer, tf32_mma_balance_kernel, grid_size, block_size, reset_output,
+                                 d_adp_group_offset, d_tc_offset, d_adp_row_indices, d_tcLocalBit,
+                                 d_sparseA2B, d_dataA, d_DenseMatB, d_DenseMatC,
+                                 numNodes, feature_dim);
         } else {
-            executeKernel(timer, tf32_mma_balance_g128_kernel, grid_size, block_size,
-                          d_adp_group_offset, d_tc_offset, d_adp_row_indices, d_tcLocalBit, 
-                          d_sparseA2B, d_dataA, d_DenseMatB, d_DenseMatC,
-                          numNodes, feature_dim);
+            executeKernel(timer, tf32_mma_balance_g128_kernel, grid_size, block_size, reset_output,
+                                 d_adp_group_offset, d_tc_offset, d_adp_row_indices, d_tcLocalBit,
+                                 d_sparseA2B, d_dataA, d_DenseMatB, d_DenseMatC,
+                                 numNodes, feature_dim);
         }
         return timer.Elapsed() / EXE_TIME;
     }
