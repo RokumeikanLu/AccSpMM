@@ -18,4 +18,4 @@ file(GLOB_RECURSE CUDA_SOURCES ${PROJECT_SOURCE_DIR}/src/mma_tf32.cu)
 add_executable(mma ${SOURCES} ${CUDA_SOURCES})
 
 find_package(CUDAToolkit REQUIRED)
-target_link_libraries(mma CUDA::cudart)
+target_link_libraries(mma PRIVATE CUDA::cudart CUDA::cublas)
