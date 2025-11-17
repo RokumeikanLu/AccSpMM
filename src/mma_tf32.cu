@@ -9,6 +9,155 @@
 #include "mmio.hpp"
 #include "tf32_comp.hpp"
 
+namespace {
+
+inline void CheckCublasStatus(cublasStatus_t status, const char* step)
+{
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cuBLAS error %d at %s\n", static_cast<int>(status), step);
+        exit(EXIT_FAILURE);
+    }
+}
+
+inline void RowMajorToColumnMajor(const MAT_VAL_TYPE* src,
+                                  MAT_VAL_TYPE*       dst,
+                                  vint                rows,
+                                  vint                cols)
+{
+    for (vint r = 0; r < rows; ++r) {
+        for (vint c = 0; c < cols; ++c) {
+            dst[c * rows + r] = src[r * cols + c];
+        }
+    }
+}
+
+inline void ColumnMajorToRowMajor(const MAT_VAL_TYPE* src,
+                                  MAT_VAL_TYPE*       dst,
+                                  vint                rows,
+                                  vint                cols)
+{
+    for (vint r = 0; r < rows; ++r) {
+        for (vint c = 0; c < cols; ++c) {
+            dst[r * cols + c] = src[c * rows + r];
+        }
+    }
+}
+
+struct ErrorStats {
+    double total_abs_error;
+    double max_abs_error;
+};
+
+ErrorStats ComputeErrorStats(const std::vector<MAT_VAL_TYPE>& reference,
+                             const std::vector<MAT_VAL_TYPE>& test)
+{
+    ErrorStats stats{0.0, 0.0};
+    if (reference.size() != test.size()) {
+        printf("Size mismatch when computing error: reference=%zu test=%zu\n",
+               reference.size(),
+               test.size());
+        return stats;
+    }
+    for (size_t i = 0; i < reference.size(); ++i) {
+        double diff = std::fabs(static_cast<double>(reference[i]) - static_cast<double>(test[i]));
+        stats.total_abs_error += diff;
+        stats.max_abs_error = std::max(stats.max_abs_error, diff);
+    }
+    return stats;
+}
+
+float RunCublasBaseline(const std::vector<MAT_VAL_TYPE>& denseA_row_major,
+                        const std::vector<MAT_VAL_TYPE>& denseB_row_major,
+                        vint                             numNodes,
+                        vint                             feature_dim,
+                        std::vector<MAT_VAL_TYPE>&       cublas_output_row_major)
+{
+    const size_t rowsA = static_cast<size_t>(numNodes);
+    const size_t colsA = static_cast<size_t>(numNodes);
+    const size_t colsC = static_cast<size_t>(feature_dim);
+
+    std::vector<MAT_VAL_TYPE> denseA_col_major(rowsA * colsA);
+    std::vector<MAT_VAL_TYPE> denseB_col_major(colsA * colsC);
+    std::vector<MAT_VAL_TYPE> denseC_col_major(rowsA * colsC, static_cast<MAT_VAL_TYPE>(0));
+
+    RowMajorToColumnMajor(denseA_row_major.data(), denseA_col_major.data(), numNodes, numNodes);
+    RowMajorToColumnMajor(denseB_row_major.data(), denseB_col_major.data(), numNodes, feature_dim);
+
+    MAT_VAL_TYPE* dA = nullptr;
+    MAT_VAL_TYPE* dB = nullptr;
+    MAT_VAL_TYPE* dC = nullptr;
+    CHECK_CUDA_ERROR(cudaMalloc(&dA, denseA_col_major.size() * sizeof(MAT_VAL_TYPE)));
+    CHECK_CUDA_ERROR(cudaMalloc(&dB, denseB_col_major.size() * sizeof(MAT_VAL_TYPE)));
+    CHECK_CUDA_ERROR(cudaMalloc(&dC, denseC_col_major.size() * sizeof(MAT_VAL_TYPE)));
+
+    CHECK_CUDA_ERROR(cudaMemcpy(dA,
+                                denseA_col_major.data(),
+                                denseA_col_major.size() * sizeof(MAT_VAL_TYPE),
+                                cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(dB,
+                                denseB_col_major.data(),
+                                denseB_col_major.size() * sizeof(MAT_VAL_TYPE),
+                                cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(dC,
+                                denseC_col_major.data(),
+                                denseC_col_major.size() * sizeof(MAT_VAL_TYPE),
+                                cudaMemcpyHostToDevice));
+
+    cublasHandle_t handle;
+    CheckCublasStatus(cublasCreate(&handle), "cublasCreate");
+    CheckCublasStatus(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH), "cublasSetMathMode");
+
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+    CheckCublasStatus(
+        cublasSgemm(handle,
+                    CUBLAS_OP_N,
+                    CUBLAS_OP_N,
+                    numNodes,
+                    feature_dim,
+                    numNodes,
+                    &alpha,
+                    dA,
+                    numNodes,
+                    dB,
+                    numNodes,
+                    &beta,
+                    dC,
+                    numNodes),
+        "cublasSgemm");
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+
+    CHECK_CUDA_ERROR(cudaMemcpy(denseC_col_major.data(),
+                                dC,
+                                denseC_col_major.size() * sizeof(MAT_VAL_TYPE),
+                                cudaMemcpyDeviceToHost));
+
+    cublas_output_row_major.resize(rowsA * colsC);
+    ColumnMajorToRowMajor(denseC_col_major.data(),
+                          cublas_output_row_major.data(),
+                          numNodes,
+                          feature_dim);
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    cublasDestroy(handle);
+    cudaFree(dA);
+    cudaFree(dB);
+    cudaFree(dC);
+    return elapsed_ms;
+}
+
+}  // namespace
+
 __host__
 void tf32_spmm(
     METCFBit<MAT_VAL_TYPE>& metcf_bit,
@@ -16,7 +165,9 @@ void tf32_spmm(
     float& elapsed_time,
     const vint feature_dim,
     GpuTimer& timer,
-    TF32Compute& tf32_compute
+    TF32Compute& tf32_compute,
+    const MAT_VAL_TYPE* denseMatBHost,
+    std::vector<MAT_VAL_TYPE>& host_output
 ) {
     vint rowWindowOffsetSize    =       metcf_bit.rowWindowOffset.size();
     vint tcOffsetSize           =       metcf_bit.tcOffset.size();
@@ -41,7 +192,8 @@ void tf32_spmm(
     std::copy(metcf_bit.tcOffset.begin(), metcf_bit.tcOffset.end(), ptr_tcOffset);
     std::copy(metcf_bit.tcLocalBit.begin(), metcf_bit.tcLocalBit.end(), ptr_tcLocalBit);
     std::copy(metcf_bit.data.begin(), metcf_bit.data.end(), ptr_data);
-    init_vec1(numNodes * feature_dim, DenseMatB, 1.0);
+    size_t denseB_elems = static_cast<size_t>(numNodes) * feature_dim;
+    memcpy(DenseMatB, denseMatBHost, denseB_elems * sizeof(MAT_VAL_TYPE));
     init_vec1(denseC_size, DenseMatC, 0.0);
 
     /*---------------- GPU Malloc ------------------*/
@@ -74,6 +226,9 @@ void tf32_spmm(
     );
 
     cudaMemcpy(DenseMatC, d_DenseMatC, sizeof(MAT_VAL_TYPE) * denseC_size, cudaMemcpyDeviceToHost);
+    const size_t valid_output = static_cast<size_t>(numNodes) * feature_dim;
+    const size_t copy_elems   = std::min(valid_output, static_cast<size_t>(denseC_size));
+    host_output.assign(DenseMatC, DenseMatC + copy_elems);
 
     free(ptr_rowWindowOffset);
     free(ptr_sparseA2B);
@@ -99,7 +254,9 @@ void adp_tf32_spmm(
     float& elapsed_time,
     const vint feature_dim,
     GpuTimer& timer,
-    TF32Compute& tf32_compute
+    TF32Compute& tf32_compute,
+    const MAT_VAL_TYPE* denseMatBHost,
+    std::vector<MAT_VAL_TYPE>& host_output
 ) {
     vint groupOffsetSize    =   adpbme.groupOffset.size();
     vint tcOffsetSize       =   adpbme.tcOffset.size();
@@ -128,7 +285,8 @@ void adp_tf32_spmm(
     std::copy(adpbme.tcLocalBit.begin(), adpbme.tcLocalBit.end(), ptr_tcLocalBit);
     std::copy(adpbme.data.begin(), adpbme.data.end(), ptr_data);
 
-    init_vec1(numNodes * feature_dim, DenseMatB, 1.0);
+    size_t denseB_elems = static_cast<size_t>(numNodes) * feature_dim;
+    memcpy(DenseMatB, denseMatBHost, denseB_elems * sizeof(MAT_VAL_TYPE));
     init_vec1(denseC_size, DenseMatC, 0.0);
 
     /*---------------- GPU Malloc ------------------*/
@@ -162,6 +320,9 @@ void adp_tf32_spmm(
         feature_dim, timer
     );
     cudaMemcpy(DenseMatC, d_DenseMatC, sizeof(MAT_VAL_TYPE) * denseC_size, cudaMemcpyDeviceToHost);
+    const size_t valid_output = static_cast<size_t>(numNodes) * feature_dim;
+    const size_t copy_elems   = std::min(valid_output, static_cast<size_t>(denseC_size));
+    host_output.assign(DenseMatC, DenseMatC + copy_elems);
 
     free(ptr_groupOffset);
     free(ptr_tcOffset);
@@ -202,11 +363,31 @@ int main(int argc, char** argv) {
     }
     
     CSR<MAT_VAL_TYPE> csr = CSR<MAT_VAL_TYPE>(coo);
-    
-    METCFBit<MAT_VAL_TYPE> metcf_bit;
-    metcf_bit.convertFromCSR(csr);
     vint numNodes = coo->rows;
     vint numEdges = coo->nnz;
+
+    if (csr.cols != numNodes) {
+        printf("Non-square matrices are not supported (rows=%u, cols=%u).\n", numNodes, csr.cols);
+        free(coo);
+        return ERROR_NOT_MATCH;
+    }
+
+    std::vector<MAT_VAL_TYPE> denseMatB(static_cast<size_t>(numNodes) * feature_dim);
+    init_vecB(static_cast<vint>(denseMatB.size()), denseMatB.data(), 1.0);
+    //init_vec1(static_cast<vint>(denseMatB.size()), denseMatB.data(), 10.0);
+    std::vector<MAT_VAL_TYPE> spmm_output;
+    spmm_output.reserve(static_cast<size_t>(numNodes) * feature_dim);
+
+    std::vector<MAT_VAL_TYPE> denseA_row_major(static_cast<size_t>(numNodes) * numNodes, 0.0f);
+    for (vint row = 0; row < numNodes; ++row) {
+        for (vint idx = csr.row_ptr[row]; idx < csr.row_ptr[row + 1]; ++idx) {
+            vint col = csr.col_idx[idx];
+            denseA_row_major[row * numNodes + col] = csr.data[idx];
+        }
+    }
+
+    METCFBit<MAT_VAL_TYPE> metcf_bit;
+    metcf_bit.convertFromCSR(csr);
     
     bool load_balance = balanceStrategy(metcf_bit, 
                                         metcf_bit.tcOffset.size() - 1, 
@@ -216,21 +397,46 @@ int main(int argc, char** argv) {
     GpuTimer timer;
     TF32Compute tf32_compute;
 
+    //load_balance = false;
+
     if(load_balance) {
         // Adaptive balance Tensor core operations
         AdpBME<MAT_VAL_TYPE> adpbme;
         adpbme.CSR2AdpBME(csr, 3, 1, 2);
         TF32Compute tf32_compute(10, 10, 128);
-        adp_tf32_spmm(adpbme, numNodes, numEdges, elapsed_time, feature_dim, timer, tf32_compute);
+        adp_tf32_spmm(adpbme,
+                      numNodes,
+                      numEdges,
+                      elapsed_time,
+                      feature_dim,
+                      timer,
+                      tf32_compute,
+                      denseMatB.data(),
+                      spmm_output);
             
     } else {
         // Tensor core operations
         TF32Compute tf32_compute;
-        tf32_spmm(metcf_bit, numNodes, numEdges, elapsed_time, feature_dim, timer, tf32_compute);
+        tf32_spmm(metcf_bit,
+                  numNodes,
+                  numEdges,
+                  elapsed_time,
+                  feature_dim,
+                  timer,
+                  tf32_compute,
+                  denseMatB.data(),
+                  spmm_output);
     }
     spmm_throughput = (float(numEdges) * float(feature_dim) * 2.0 * 1000.) 
                     / (elapsed_time * 1000. * 1000. * 1000.);
 
+    std::vector<MAT_VAL_TYPE> cublas_output;
+    float cublas_time = RunCublasBaseline(denseA_row_major, denseMatB, numNodes, feature_dim, cublas_output);
+    ErrorStats error_stats = ComputeErrorStats(cublas_output, spmm_output);
+    printf("cuBLAS TF32 time: %.4f ms | SpMM time: %.4f ms\n", cublas_time, elapsed_time);
+    printf("cuBLAS vs SpMM absolute error: total=%.6e max=%.6e\n",
+           error_stats.total_abs_error,
+           error_stats.max_abs_error);
     std::ofstream outFile("result.csv", std::ios::app);
     if (!outFile) {
         std::cerr << "Error Opening result.csv" << std::endl;
