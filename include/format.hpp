@@ -8,6 +8,7 @@
 
 #pragma once
 #include "common.hpp"
+#include <array>
 
 template <typename DataType>
 class SparseMatrixFormat {
@@ -235,7 +236,8 @@ public:
             tcOffset.resize(tcOffset.size() + window_tc_num, 0);
             
             std::vector<TCLOCAL_TYPE> tcLocalIdtmp(window_tc_num * tc_tmp_len);
-            std::vector<std::vector<DataType>> datatmp(window_tc_num);
+            static constexpr size_t TILE_CAPACITY = ROW_WINDOW * COL_WINDOW;
+            std::vector<std::array<DataType, TILE_CAPACITY>> datatmp(window_tc_num);
             for (vint r = iter; r < std::min(iter + ROW_WINDOW, num_nodes); ++r) {
                 for (vint nnz_id = csr.row_ptr[r]; nnz_id < csr.row_ptr[r + 1]; ++nnz_id) {
                     vint c_idx = clean_edges2col[csr.col_idx[nnz_id]];
@@ -258,14 +260,25 @@ public:
                         std::cout << "ERROR: in convertFromSCR(): TC shape is not surported!!!" << std::endl;
                     }
 
-                    datatmp[c_idx / COL_WINDOW].push_back(csr.data[nnz_id]);
+                    datatmp[c_idx / COL_WINDOW][local_idx] = csr.data[nnz_id];
                 }
             }
      
             tcLocalBit.insert(tcLocalBit.end(), tcLocalIdtmp.begin(), tcLocalIdtmp.end());
-            
-            for (vint i = 0; i < datatmp.size(); ++i) {
-                data.insert(data.end(), datatmp[i].begin(), datatmp[i].end());
+
+            auto has_value = [&](vint tile_idx, vint local_pos) -> bool {
+                const vint bit_block = (tc_tmp_len == 1) ? 0 : (local_pos / 64);
+                const vint bit_offset = local_pos % 64;
+                const vint tc_vec_idx = tile_idx * tc_tmp_len + bit_block;
+                return (tcLocalIdtmp[tc_vec_idx] >> bit_offset) & 0x1ULL;
+            };
+
+            for (vint tile_idx = 0; tile_idx < window_tc_num; ++tile_idx) {
+                for (vint local_pos = 0; local_pos < static_cast<vint>(TILE_CAPACITY); ++local_pos) {
+                    if (has_value(tile_idx, local_pos)) {
+                        data.push_back(datatmp[tile_idx][local_pos]);
+                    }
+                }
             }
         }
 
@@ -381,7 +394,8 @@ public:
                 current_group_size++;
             }
 
-            std::vector<std::vector<DataType>> datatmp(window_tc_num);
+            static constexpr size_t TILE_CAPACITY = ROW_WINDOW * COL_WINDOW;
+            std::vector<std::array<DataType, TILE_CAPACITY>> datatmp(window_tc_num);
             vint tc_tmp_len = ROW_WINDOW * COL_WINDOW == 64 ? 1 : 2; // ROW_WINDOW * COL_WINDOW = 64 | 128
             std::vector<TCLOCAL_TYPE> tcLocalBittmp(window_tc_num * tc_tmp_len, 0);
             for (vint r = iter; r < std::min(iter + ROW_WINDOW, num_nodes); ++r) {
@@ -389,28 +403,40 @@ public:
                     vint c_idx = clean_edges2col[csr.col_idx[nnz_id]];
                     vint tc_idx = total_tc_num + c_idx / COL_WINDOW;
                     tcOffset[tc_idx]++;
+                    vint local_idx = (r % ROW_WINDOW) * COL_WINDOW + c_idx % COL_WINDOW;
+                    vint tile_local = c_idx / COL_WINDOW;
                     if (tc_tmp_len == 1){
-                        TCLOCAL_TYPE local_idx_mask = 1ULL << ((r % ROW_WINDOW) * COL_WINDOW + c_idx % COL_WINDOW);
-                        tcLocalBittmp[c_idx / COL_WINDOW] |= local_idx_mask;
+                        TCLOCAL_TYPE local_idx_mask = 1ULL << local_idx;
+                        tcLocalBittmp[tile_local] |= local_idx_mask;
                     } else if(tc_tmp_len == 2){
-                        TCLOCAL_TYPE local_idx = (r % ROW_WINDOW) * COL_WINDOW + c_idx % COL_WINDOW;
                         if (local_idx < 64){
                             TCLOCAL_TYPE local_idx_mask = 1ULL << local_idx;
-                            tcLocalBittmp[c_idx / COL_WINDOW * 2] |= local_idx_mask;
+                            tcLocalBittmp[tile_local * 2] |= local_idx_mask;
                         } else{
                             TCLOCAL_TYPE local_idx_mask = 1ULL << (local_idx-64);
-                            tcLocalBittmp[c_idx / COL_WINDOW * 2 + 1] |= local_idx_mask;
+                            tcLocalBittmp[tile_local * 2 + 1] |= local_idx_mask;
                         }
                     } else {
                         std::cout << "ERROE: in CSR2AdpBME(): TC shape is not surportable!!" << std::endl;
                     }
-                    datatmp[c_idx / COL_WINDOW].push_back(csr.data[nnz_id]);
+                    datatmp[tile_local][local_idx] = csr.data[nnz_id];
                 }
             }
             tcLocalBit.insert(tcLocalBit.end(), tcLocalBittmp.begin(), tcLocalBittmp.end());
 
-            for (vint i = 0; i < datatmp.size(); ++i) {
-                data.insert(data.end(), datatmp[i].begin(), datatmp[i].end());
+            auto has_value = [&](vint tile_idx, vint local_pos) -> bool {
+                const vint bit_block = (tc_tmp_len == 1) ? 0 : (local_pos / 64);
+                const vint bit_offset = local_pos % 64;
+                const vint tc_vec_idx = tile_idx * tc_tmp_len + bit_block;
+                return (tcLocalBittmp[tc_vec_idx] >> bit_offset) & 0x1ULL;
+            };
+
+            for (vint tile_idx = 0; tile_idx < window_tc_num; ++tile_idx) {
+                for (vint local_pos = 0; local_pos < static_cast<vint>(TILE_CAPACITY); ++local_pos) {
+                    if (has_value(tile_idx, local_pos)) {
+                        data.push_back(datatmp[tile_idx][local_pos]);
+                    }
+                }
             }
             total_tc_num += window_tc_num;
         }
